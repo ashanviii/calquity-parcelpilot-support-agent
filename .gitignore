@@ -14,3 +14,10 @@ build/
 
 # never commit a real key, even in the sample
 .env.example.local
+
+# internal working docs — kept locally, not published
+DEMO_SCRIPT.md
+QUICKSTART.md
+INDEX.md
+DELIVERY_SUMMARY.md
+SUBMISSION.md

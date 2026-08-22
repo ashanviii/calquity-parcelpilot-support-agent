@@ -336,7 +336,18 @@ export class KnowledgeBase {
         trustNote: meta.trustNote,
       });
     }
-    return hits.sort((a, b) => b.score - a.score).slice(0, limit);
+    const ranked = hits.sort((a, b) => b.score - a.score);
+    if (limit < 2) return ranked.slice(0, limit);
+
+    const head = ranked.slice(0, limit);
+    if (head.some((h) => h.kind === 'historical_ticket')) return head;
+
+    // A past ticket that matched the query but lost on authority weighting is the most
+    // useful thing we can show: it is the conflict. The 0.45 low-reliability multiplier
+    // is meant to keep it from being answered *from*, not to hide it, so reserve the last
+    // slot rather than letting the cut-off drop it on some phrasings and not others.
+    const ticket = ranked.find((h) => h.kind === 'historical_ticket');
+    return ticket ? [...head.slice(0, limit - 1), ticket] : head;
   }
 
   listReadable(ctx: AccessContext): DocMeta[] {

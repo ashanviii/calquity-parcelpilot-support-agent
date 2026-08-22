@@ -104,10 +104,27 @@ check('current policy v3 outranks deprecated v2', !v2 || !v3 || v3.score > v2.sc
 
 const hist = await call(northstar, 'document_search', { query: 'cancellation fee after 30 minutes' });
 const histHit = (hist.results ?? []).find((r: any) => r.kind === 'historical_ticket');
-check('past ticket resolution is retrievable but marked low reliability',
-  !histHit || histHit.reliability === 'low');
+check('past ticket resolution is retrieved', Boolean(histHit),
+  (hist.results ?? []).map((r: any) => r.source).join(' | '));
+check('past ticket resolution is marked low reliability', histHit?.reliability === 'low');
 check('past ticket resolution carries a context-only trust note',
-  !histHit || /CONTEXT ONLY/i.test(histHit.trustNote ?? ''));
+  /CONTEXT ONLY/i.test(histHit?.trustNote ?? ''));
+
+// The contradicting ticket scores below every current source by design, so it used to fall
+// outside the cut on longer queries and the conflict silently disappeared. It must survive
+// whatever phrasing the model happens to choose.
+for (const q of [
+  'Can I cancel this order without a fee?',
+  'cancel shipment before pickup fee',
+  'cancellation fee waiver booked shipment not yet picked up policy',
+]) {
+  const r = await call(northstar, 'document_search', { query: q });
+  const t = (r.results ?? []).find((x: any) => x.kind === 'historical_ticket');
+  check(`contradicting ticket survives the cut: "${q}"`, Boolean(t),
+    (r.results ?? []).map((x: any) => x.source).join(' | '));
+  check(`contradicting ticket never outranks a current source: "${q}"`,
+    !t || r.results[0].kind !== 'historical_ticket');
+}
 
 console.log('\n-- calculations (measured against the dataset snapshot) --');
 const f1001 = await call(northstar, 'compute_case_facts', { orderId: 'ORD-1001' });
