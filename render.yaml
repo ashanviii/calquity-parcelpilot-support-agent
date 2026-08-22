@@ -1,0 +1,31 @@
+# Render Blueprint — deploys the whole app as ONE service on one URL.
+#
+# The API and the built UI are served by the same Node process. That matters here beyond
+# convenience: proposed actions live in memory between the message that proposes them and
+# the request that confirms them, so the app must run as a single long-lived instance.
+# Splitting it across serverless functions would break the confirmation flow.
+#
+# Usage: push to GitHub, then Render → New → Blueprint → pick this repo.
+# Render prompts for OPENAI_API_KEY (sync: false keeps it out of the repo).
+
+services:
+  - type: web
+    name: parcelpilot-ai-support
+    runtime: node
+    plan: free
+    # NOTE: do not add numInstances here. Scaling is a paid feature and the free
+    # plan rejects the field, which fails the whole blueprint. Free is a single
+    # instance anyway, which is what the in-memory action ledger needs.
+    buildCommand: npm install && npm --prefix client install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o
+      - key: NODE_VERSION
+        value: "20"
+      # Caps how fast one caller can spend the API key on a public demo URL.
+      - key: RATE_LIMIT_PER_WINDOW
+        value: "25"

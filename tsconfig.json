@@ -9,7 +9,8 @@
     "strict": true,
     "resolveJsonModule": true,
     "moduleResolution": "node",
+    "forceConsistentCasingInFileNames": true,
     "outDir": "./dist"
   },
-  "include": ["server.ts"]
+  "include": ["server.ts", "src/**/*.ts"]
 }

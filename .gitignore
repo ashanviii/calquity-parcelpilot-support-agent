@@ -11,3 +11,6 @@ build/
 *.swp
 *.swo
 *~
+
+# never commit a real key, even in the sample
+.env.example.local

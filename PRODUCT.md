@@ -2,21 +2,54 @@
 
 ## Which Additional Problem Was Addressed
 
-I addressed **Problem 1: Proactive Issue Detection** with additional infrastructure and recommended workflows.
+I addressed **Problem 2: Trust and Reliability**.
 
-While the minimum requirements focus on reactive chatbot responses, the system includes:
+The data pack is deliberately inconsistent — a deprecated policy contradicts the current
+one, two customer agreements override the general rules in different ways, two accounts
+have no agreement at all, and closed tickets contain answers that were wrong when they were
+given. A confidently incorrect answer here is worse than no answer, so this is where the
+work went.
 
-1. **Issue Pattern Detection Framework**
-   - Foundation for identifying recurring issues
-   - SLA violation tracking
-   - Multiple-customer impact detection
-   - Unusual shipment pattern flags
+**1. Precedence is enforced in retrieval, not just requested in the prompt**
 
-2. **Internal Operations Dashboard** (Recommended Future Build)
-   - High-priority issues surfaced by urgency/SLA
-   - Recurring issue clusters
-   - Anomaly alerts
-   - Team workload visualization
+Every passage carries authority metadata. Ranking multiplies the relevance score by source
+reliability, halves it if the document is superseded, and boosts an agreement when it
+belongs to the account asking. The order comes from the pack itself (Support Policy v3 §1):
+signed agreement → current policy/SOP → product documentation.
+
+**2. Unreliable sources are surfaced and labelled, not hidden**
+
+Deprecated policy v2 and past ticket resolutions stay searchable, down-weighted, carrying a
+context-only trust note. Hiding them would make the agent silently ignore a contradiction;
+surfacing them lets it say *"a previous ticket told you X, that was wrong for your account,
+here is the current position."*
+
+The pack makes this concrete: TKT-450 told Northstar a INR 250 cancellation fee applied
+after 30 minutes. Northstar's agreement waives that fee entirely. An agent that trusted
+ticket history would repeat a two-month-old mistake to the customer it most affects.
+
+**3. Facts and rules are computed separately**
+
+`compute_case_facts` returns timing, fault and money figures but never decides the outcome.
+The decision has to come from a retrieved document. This makes it structurally harder for
+the model to skip precedence and answer from memory.
+
+**4. Refusal is a designed path**
+
+The SOP forbids promising a credit when carrier fault, pickup timing or customer fault is
+unknown, so the fault flags are returned explicitly and the agent is instructed to say what
+needs verifying rather than guess. Retrieval returning nothing produces "not covered by the
+supplied documents, escalating" rather than an invented figure.
+
+**5. The reasoning is inspectable**
+
+Every answer shows which tools ran, with what arguments, and which documents were cited —
+expandable in the UI. Reviewable reasoning is what makes a support tool trustworthy in
+practice; an answer you cannot audit is one the team will not rely on.
+
+**Not addressed: Problem 1 (Proactive Issue Detection).** Deliberately out of scope for this
+submission — see *Recommended Future Builds* below, where it is the highest-priority next
+build, and *What Was Intentionally Left Out*.
 
 ## Product Decisions & Reasoning
 
@@ -24,7 +57,7 @@ While the minimum requirements focus on reactive chatbot responses, the system i
 
 **Decision:** Build both customer-facing and internal support modes.
 
-**Why:** 
+**Why:**
 - Customers need self-service for common questions
 - Support team needs deeper investigation tools
 - Single system serves both reduces maintenance
@@ -32,7 +65,7 @@ While the minimum requirements focus on reactive chatbot responses, the system i
 
 **Trade-off:** More complex role management, but delivers more value
 
-### 2. Three Tool Types with Clear Separation
+### 2. Four Tools with Clear Separation
 
 **Decision:** Document search, data lookup, state-changing actions.
 
@@ -43,8 +76,10 @@ While the minimum requirements focus on reactive chatbot responses, the system i
 - Extensible pattern for new tools
 
 **What Each Does:**
-- **Search**: Non-destructive, read-only policy lookup
-- **Lookup**: Account-specific data retrieval with access control
+- **Search**: Non-destructive, read-only document lookup with authority weighting
+- **Lookup**: Account-specific record retrieval with access control
+- **Calculate**: Timing/fault/fee facts only — never the decision, which must come from a
+  retrieved document
 - **Actions**: Escalations requiring confirmation (audit trail)
 
 ### 3. Explicit Source Reliability Scoring
@@ -278,22 +313,28 @@ While the minimum requirements focus on reactive chatbot responses, the system i
 - Reason: Assessment focus is on agent logic, not database design
 - Production: Would add PostgreSQL + Redis
 
-### 2. Real AI Agent (Using Function Calling)
-- Current: Simulated agent with explicit tool calls
-- Reason: Stable demo behavior, no LLM variability
-- Production: Use actual LLM-based agent with OpenAI functions
-- Why simulated for now: Demo needs predictable behavior for video/evaluation
+### 2. Proactive Issue Detection (Problem 1)
+- Current: not built
+- Reason: I chose to go deep on Problem 2 rather than shallow on both. The pack holds
+  4 accounts and 7 tickets — enough to *display* a dashboard, not enough for clustering or
+  anomaly detection to mean anything. A recurring-issue view built on this volume would
+  demo well and mislead.
+- Next: the data model already supports it — see Phase 2 below
 
-### 3. Vector Embeddings / RAG
-- Current: Simple document reference simulation
-- Reason: Would need to process actual PDFs
-- Production: Use Pinecone/Weaviate for semantic search
-- Why not included: Assessment data pack evaluation, not full implementation
+### 3. Vector Embeddings / Hybrid Retrieval
+- Current: BM25 only
+- Reason: ~25 passages across six short documents, with questions phrased in the documents'
+  own vocabulary. Embeddings would add an API call on the request path and non-determinism
+  to ranking, for recall the corpus does not need.
+- Next: hybrid BM25 + embeddings once the corpus grows past a few dozen documents, or when
+  question phrasing diverges from document wording
 
-### 4. Sophisticated Conflict Resolution
-- Current: Simple policy hierarchy
-- Reason: Real conflicts require domain expertise review
-- Production: Build rule engine for complex policy conflicts
+### 4. A Rule Engine for Conflict Resolution
+- Current: precedence is applied through retrieval ranking plus explicit instruction, and
+  the agent reasons over labelled sources
+- Reason: this handles the conflicts present in the pack. A declarative rule engine is the
+  right answer when precedence itself becomes contested or multi-dimensional.
+- Next: encode precedence as data rather than ranking weights if contract variety grows
 
 ### 5. Customer Feedback Loop
 - Current: No rating system
@@ -301,20 +342,38 @@ While the minimum requirements focus on reactive chatbot responses, the system i
 - Future: Add thumbs up/down, explicit ratings, feedback text
 
 ### 6. Advanced Anomaly Detection
-- Current: Framework only
-- Reason: Would need historical data and ML model
-- Future: Implement once data volume exists
+- Current: not built
+- Reason: needs historical volume this pack does not contain
+- Future: implement once real ticket volume exists
+
+### 7. Persistent Action Ledger
+- Current: proposed and confirmed actions live in an in-memory map, so they are lost on
+  restart
+- Reason: the audit trail is the part that matters for the confirmation flow, and its shape
+  is settled; the storage behind it is not interesting at this scale
+- Production: append-only table, since this is the record of who authorised what
 
 ## Metrics to Judge Product Success
 
-**North Star Metric: Support Team Time Savings**
+**The one metric: corrected-answer rate.**
 
-Why this matters:
-- Directly impacts operational cost
-- Measurable
-- Aligns with ParcelPilot's business model
+The share of AI answers a human had to correct on substance — a wrong fee, a missed contract
+override, a stale policy, an invented figure.
 
-**Definition:**
+Why this one, over the more obvious time-saved metric: the failure mode that kills this
+product is a confidently wrong answer, not a slow one. Time savings is the outcome we want,
+but it is a *lagging* consequence of trust. If corrected-answer rate is bad, the team stops
+relying on the tool and time savings never arrive no matter how fast it is. If it is good,
+time savings follow. It also fails loudly — one bad cancellation-fee answer to an enterprise
+account is visible immediately, whereas a slow answer is merely annoying.
+
+- **Target:** below 5%, measured on a sampled review of answers by the ops team
+- **Measurement:** support staff flag corrections in the ticket; sample weekly
+- **Watch alongside it:** the escalation rate. Driving corrections to zero by escalating
+  everything is not a win, so the pair has to be read together.
+
+**Business outcome it drives: Support Team Time Savings**
+
 Average time for support staff to resolve a ticket with AI vs. without.
 
 - **Target:** 30% reduction in median resolution time

@@ -1,288 +1,306 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { ChatOpenAI } from 'langchain/chat_models/openai';
-import { initializeAgent, Tool } from 'langchain/agents';
-import { LLMChain } from 'langchain/chains';
-import { PromptTemplate } from 'langchain/prompts';
-import { SerpAPI } from 'langchain/tools';
-import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
-import XLSX from 'xlsx';
+import { fileURLToPath } from 'url';
+import { v4 as uuidv4 } from 'uuid';
+
+import { normalizeContext, canPerformAction, canReadRecord } from './src/access.js';
+import { KnowledgeBase } from './src/knowledge.js';
+import { loadOperationalData } from './src/data.js';
+import { pendingActions } from './src/tools.js';
+import {
+  runAgent,
+  AgentUnavailableError,
+  describeUpstreamError,
+  type AgentTurn,
+} from './src/agent.js';
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
-// ============= DATA LAYER =============
+/**
+ * The data pack. Defaults to ./data, which holds the supplied pack; override with
+ * PARCELPILOT_DATA_DIR to point somewhere else. The system has no synthetic fallback —
+ * the assessment requires it to answer only from the supplied pack, so a missing pack is
+ * a startup failure rather than something to paper over.
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-interface AccessContext {
-  userId: string;
-  userType: 'customer' | 'support_staff' | 'operations_staff';
-  accountId?: string;
-  role?: string;
-}
-
-interface DocumentSource {
-  name: string;
-  path: string;
-  reliability: 'high' | 'medium' | 'low';
-  effectiveDate: string;
-}
-
-// Mock database for account data
-const accounts = new Map([
-  ['ACC-001', { name: 'Northstar Logistics', tier: 'enterprise', contracts: ['05_Northstar_Logistics_Enterprise_Agreement.pdf'] }],
-  ['ACC-002', { name: 'LumenWorks', tier: 'premium', contracts: ['06_LumenWorks_Service_Agreement.pdf'] }],
-]);
-
-const documentSources: DocumentSource[] = [
-  { name: '01_Support_Policy_v3_CURRENT.pdf', path: '../AI Agent Assessment - Candidate Pack/01_Support_Policy_v3_CURRENT.pdf', reliability: 'high', effectiveDate: '2024-01-01' },
-  { name: '02_Support_Policy_v2_DEPRECATED.pdf', path: '../AI Agent Assessment - Candidate Pack/02_Support_Policy_v2_DEPRECATED.pdf', reliability: 'low', effectiveDate: '2023-01-01' },
-  { name: '03_Cancellation_and_Service_Credit_SOP_v4.pdf', path: '../AI Agent Assessment - Candidate Pack/03_Cancellation_and_Service_Credit_SOP_v4.pdf', reliability: 'high', effectiveDate: '2024-01-01' },
-  { name: '04_Product_Operations_Guide_and_Known_Issues.pdf', path: '../AI Agent Assessment - Candidate Pack/04_Product_Operations_Guide_and_Known_Issues.pdf', reliability: 'medium', effectiveDate: '2024-06-01' },
-  { name: '05_Northstar_Logistics_Enterprise_Agreement.pdf', path: '../AI Agent Assessment - Candidate Pack/05_Northstar_Logistics_Enterprise_Agreement.pdf', reliability: 'high', effectiveDate: '2024-01-01' },
-  { name: '06_LumenWorks_Service_Agreement.pdf', path: '../AI Agent Assessment - Candidate Pack/06_LumenWorks_Service_Agreement.pdf', reliability: 'high', effectiveDate: '2024-01-01' },
-];
-
-// Load operational data
-let operationalData: any = {};
-try {
-  const xlsxPath = path.join('/Users/sbhardwaj95/Downloads/AI Agent Assessment - Candidate Pack', 'ParcelPilot_Assessment_Data.xlsx');
-  const workbook = XLSX.readFile(xlsxPath);
-  workbook.SheetNames.forEach(sheet => {
-    operationalData[sheet] = XLSX.utils.sheet_to_json(workbook.Sheets[sheet]);
-  });
-} catch (error) {
-  console.log('Note: Excel file not loaded - using mock data');
-}
-
-// ============= ACCESS CONTROL =============
-
-function enforceAccessControl(context: AccessContext, resourceType: string, resourceId?: string): boolean {
-  if (context.userType === 'customer') {
-    // Customers can only see their own account data
-    if (resourceType === 'order' || resourceType === 'ticket') {
-      return resourceId?.startsWith(context.accountId || '') || false;
-    }
-    // Customers can see public documents (policies)
-    if (resourceType === 'document') {
-      return true;
-    }
-  } else if (context.userType === 'support_staff' || context.userType === 'operations_staff') {
-    // Support staff can see all operational data
-    return true;
+function resolveDataDir(): string {
+  if (process.env.PARCELPILOT_DATA_DIR) return path.resolve(process.env.PARCELPILOT_DATA_DIR);
+  // ./data when running from source (tsx), ../data when running the build from dist/.
+  for (const candidate of [path.join(HERE, 'data'), path.join(HERE, '..', 'data')]) {
+    if (fs.existsSync(candidate)) return path.resolve(candidate);
   }
-  return false;
+  return path.resolve(path.join(HERE, 'data'));
 }
 
-// ============= AGENT TOOLS =============
+const DATA_DIR = resolveDataDir();
 
-const tools: Tool[] = [];
-
-// Tool 1: Document Search/Retrieval
-const documentSearchTool = {
-  name: 'document_search',
-  description: 'Search policies, agreements, product documentation, SOPs and other documents. Returns relevant passages with source reliability scores.',
-  async call(query: string, context: AccessContext) {
-    const results: any[] = [];
-    
-    // In production, this would use vector embeddings for semantic search
-    // For now, simulate document retrieval with relevance scoring
-    for (const source of documentSources) {
-      if (source.reliability === 'high' || !query.includes('deprecat')) {
-        results.push({
-          source: source.name,
-          reliability: source.reliability,
-          effectiveDate: source.effectiveDate,
-          relevance: Math.random() * 0.7 + 0.3,
-          excerpt: `Content from ${source.name}...`,
-        });
-      }
-    }
-    
-    return results.sort((a, b) => (b.reliability === 'high' ? 1 : 0) - (a.reliability === 'high' ? 1 : 0)).slice(0, 3);
-  },
-};
-
-// Tool 2: Structured Data Lookup
-const dataLookupTool = {
-  name: 'data_lookup',
-  description: 'Query account, order, and ticket data. Returns structured information with access control enforcement.',
-  async call(query: string, context: AccessContext, resourceId?: string) {
-    if (context.userType === 'customer' && resourceId && !enforceAccessControl(context, 'order', resourceId)) {
-      return { error: 'Access denied: You can only view data for your own account' };
-    }
-    
-    // Simulate data lookup
-    const mockOrders = [
-      { id: 'ORD-1001', accountId: 'ACC-001', status: 'pending_cancellation', carrier: 'FedEx', weight: 15.5, value: 500 },
-      { id: 'ORD-1002', accountId: 'ACC-002', status: 'delivered', carrier: 'UPS', weight: 8.2, value: 250 },
-    ];
-    
-    const result = mockOrders.find(o => o.id === resourceId);
-    return result || { message: 'Order not found' };
-  },
-};
-
-// Tool 3: State-Changing Action (with confirmation required)
-const stateChangingActionTool = {
-  name: 'create_escalation',
-  description: 'Escalate a ticket, create a follow-up task, or update a ticket status. REQUIRES explicit user confirmation.',
-  async call(action: string, params: any, context: AccessContext, confirmed: boolean = false) {
-    if (context.userType === 'customer') {
-      return { error: 'Access denied: Only support staff can create escalations' };
-    }
-    
-    if (!confirmed) {
-      return {
-        requiresConfirmation: true,
-        action: action,
-        params: params,
-        message: 'This action requires confirmation. Please confirm to proceed.',
-      };
-    }
-    
-    const actionId = uuidv4();
-    return {
-      success: true,
-      actionId: actionId,
-      action: action,
-      timestamp: new Date().toISOString(),
-      message: `${action} created successfully`,
-    };
-  },
-};
-
-// ============= AGENT LOGIC =============
-
-const model = new ChatOpenAI({
-  modelName: 'gpt-4',
-  temperature: 0.2,
-  openAIApiKey: process.env.OPENAI_API_KEY,
-});
-
-async function runAgent(userQuery: string, context: AccessContext): Promise<any> {
-  const systemPrompt = `You are a ParcelPilot support AI agent. You help both customers and internal staff resolve issues.
-
-Your responsibilities:
-1. Use document_search to find relevant policies and agreements
-2. Use data_lookup to query account, order, or ticket information
-3. Use create_escalation for actions that require authorization
-4. Always explain your reasoning and cite sources
-5. Flag uncertainty and recommend human escalation when appropriate
-
-For customer queries, only provide information about their own account.
-For support staff queries, provide full access to all systems.
-
-When a state-changing action is needed:
-- Prepare the action details
-- Ask the user to confirm before executing
-- Execute only after explicit confirmation
-
-Source reliability guide:
-- High reliability: Current policies, signed agreements
-- Medium reliability: Operations guides, recent documentation
-- Low reliability: Deprecated policies, historical information
-
-${context.userType === 'customer' ? 'Remember: You are speaking with a customer. Be helpful and professional.' : 'Remember: You are speaking with ParcelPilot staff. Provide detailed operational insights.'}`;
-
-  try {
-    // Simulate agent processing
-    const response = {
-      query: userQuery,
-      usedTools: ['document_search', 'data_lookup'],
-      findings: [
-        'Retrieved policy documentation with high reliability',
-        'Queried account-specific data',
-        'Checked for applicable contract overrides',
-      ],
-      reasoning: 'Based on the customer\'s account tier and current policies...',
-      recommendation: 'This issue can be resolved by...',
-      requiresEscalation: Math.random() > 0.7,
-      sources: ['01_Support_Policy_v3_CURRENT.pdf', '05_Northstar_Logistics_Enterprise_Agreement.pdf'],
-    };
-    
-    return response;
-  } catch (error) {
-    throw error;
-  }
+if (!fs.existsSync(DATA_DIR)) {
+  console.error(
+    `[fatal] Data pack directory not found: ${DATA_DIR}\n` +
+      'Set PARCELPILOT_DATA_DIR to the folder containing the assessment pack PDFs and ' +
+      'ParcelPilot_Assessment_Data.xlsx.',
+  );
+  process.exit(1);
 }
 
-// ============= API ENDPOINTS =============
+const db = loadOperationalData(DATA_DIR);
+const kb = await KnowledgeBase.load(DATA_DIR, db.tickets);
+
+/**
+ * A hosted demo is a public URL spending real money on every message. This caps how fast
+ * any single caller can burn the key; without it one script turns the demo into a 503 for
+ * everyone who looks at it afterwards.
+ */
+const RATE_WINDOW_MS = 10 * 60_000;
+const RATE_MAX = Number(process.env.RATE_LIMIT_PER_WINDOW) || 25;
+const hits = new Map<string, number[]>();
+
+function rateLimited(ip: string): boolean {
+  const now = Date.now();
+  const recent = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  recent.push(now);
+  hits.set(ip, recent);
+  if (hits.size > 5000) hits.clear(); // crude bound; this is a demo, not a gateway
+  return recent.length > RATE_MAX;
+}
+
+// ============= API =============
 
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, context } = req.body;
-    
-    if (!message || !context) {
-      return res.status(400).json({ error: 'Missing message or context' });
+    const { message, context, history } = req.body ?? {};
+
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      return res
+        .status(400)
+        .json({ error: 'bad_request', message: 'A "message" string is required.' });
     }
-    
-    // Validate and sanitize context
-    const accessContext: AccessContext = {
-      userId: context.userId || uuidv4(),
-      userType: context.userType || 'customer',
-      accountId: context.accountId,
-      role: context.role,
-    };
-    
-    const response = await runAgent(message, accessContext);
-    res.json({ response, context: accessContext });
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error', message: String(error) });
+
+    const ip = String(req.headers['x-forwarded-for'] ?? req.ip ?? 'unknown').split(',')[0].trim();
+    if (rateLimited(ip)) {
+      return res.status(429).json({
+        error: 'rate_limited',
+        message: `Demo limit reached (${RATE_MAX} messages per 10 minutes). Try again shortly.`,
+      });
+    }
+
+    const ctx = normalizeContext(context, uuidv4());
+    if (ctx.userType === 'customer') {
+      if (!ctx.accountId) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: 'Customer sessions must supply an accountId.',
+        });
+      }
+      // A customer session must name a real account, or every scoped lookup silently
+      // returns nothing and the agent looks broken rather than restricted.
+      if (!db.accounts.some((a) => a.account_id === ctx.accountId)) {
+        return res.status(400).json({
+          error: 'bad_request',
+          message: `Unknown accountId "${ctx.accountId}".`,
+        });
+      }
+    }
+
+    const turns: AgentTurn[] = Array.isArray(history)
+      ? history
+          .filter(
+            (h: any) =>
+              (h?.role === 'user' || h?.role === 'assistant') && typeof h.content === 'string',
+          )
+          .map((h: any) => ({ role: h.role, content: h.content }))
+      : [];
+
+    const result = await runAgent(message, ctx, kb, db, turns);
+
+    res.json({
+      answer: result.answer,
+      toolsUsed: result.toolsUsed,
+      trace: result.trace,
+      sources: result.sources,
+      proposedActions: result.proposedActions,
+      iterations: result.iterations,
+      model: result.model,
+      context: ctx,
+    });
+  } catch (err) {
+    const upstream = err instanceof AgentUnavailableError ? err : describeUpstreamError(err);
+    if (upstream) {
+      console.error('[chat] agent unavailable:', upstream.message);
+      return res.status(503).json({ error: 'agent_unavailable', message: upstream.message });
+    }
+    console.error('[chat] ', err);
+    res.status(500).json({ error: 'internal_error', message: (err as Error).message });
   }
 });
 
 app.post('/api/confirm-action', async (req, res) => {
   try {
-    const { actionId, context, params } = req.body;
-    
-    const accessContext: AccessContext = {
-      userId: context.userId,
-      userType: context.userType,
-      accountId: context.accountId,
-    };
-    
-    if (accessContext.userType === 'customer') {
-      return res.status(403).json({ error: 'Access denied' });
+    const { actionId, context, confirm } = req.body ?? {};
+    const ctx = normalizeContext(context, uuidv4());
+
+    const allowed = canPerformAction(ctx);
+    if (!allowed.allowed) {
+      return res.status(403).json({ error: 'access_denied', message: allowed.reason });
     }
-    
-    const result = {
-      actionId,
-      confirmed: true,
-      executedAt: new Date().toISOString(),
-      status: 'completed',
-    };
-    
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error' });
+
+    const pending = typeof actionId === 'string' ? pendingActions.get(actionId) : undefined;
+    if (!pending) {
+      return res.status(404).json({ error: 'not_found', message: 'No such pending action.' });
+    }
+    if (pending.status !== 'awaiting_confirmation') {
+      return res.status(409).json({
+        error: 'already_resolved',
+        message: `Action was already ${pending.status}.`,
+        action: pending,
+      });
+    }
+
+    if (confirm === false) {
+      pending.status = 'rejected';
+      return res.json({ action: pending, message: 'Action rejected; nothing was changed.' });
+    }
+
+    // Apply the effect so confirmation means something. Mocked locally, as the brief allows.
+    const effects: string[] = [];
+    const orderId = pending.params.orderId as string | undefined;
+    const ticketId = pending.params.ticketId as string | undefined;
+
+    if (pending.action === 'cancel_order' && orderId) {
+      const order = db.orders.find((o) => o.order_id === orderId);
+      if (order) {
+        order.status = 'CANCELLED';
+        effects.push(`${orderId} status set to CANCELLED`);
+      }
+    }
+    if (pending.action === 'escalate_ticket' && ticketId) {
+      const ticket = db.tickets.find((t) => t.ticket_id === ticketId);
+      if (ticket) {
+        ticket.status = 'escalated';
+        effects.push(`${ticketId} marked escalated`);
+      }
+    }
+    if (pending.action === 'issue_service_credit') {
+      effects.push(
+        `service credit of ${db.currency} ${pending.params.creditAmountInr ?? 0} queued for billing`,
+      );
+    }
+    if (pending.action === 'create_followup_task') {
+      effects.push('follow-up task created');
+    }
+
+    pending.status = 'executed';
+    pending.executedAt = new Date().toISOString();
+
+    res.json({ action: pending, effects, message: `${pending.action} executed.` });
+  } catch (err) {
+    console.error('[confirm-action] ', err);
+    res.status(500).json({ error: 'internal_error', message: (err as Error).message });
   }
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
+    openAiKeyConfigured: Boolean(
+      process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.startsWith('your_'),
+    ),
+    dataPack: {
+      dir: DATA_DIR,
+      documents: [...kb.docs.values()].filter((d) => d.kind !== 'historical_ticket').length,
+      historicalTickets: [...kb.docs.values()].filter((d) => d.kind === 'historical_ticket')
+        .length,
+      passages: kb.chunks.length,
+    },
+    dataset: {
+      snapshot: db.snapshotLabel,
+      currency: db.currency,
+      accounts: db.accounts.length,
+      orders: db.orders.length,
+      tickets: db.tickets.length,
+    },
+  });
+});
+
+/** Populates the UI's account picker from the pack rather than hardcoding accounts. */
+app.get('/api/accounts', (_req, res) => {
+  res.json({
+    snapshot: db.snapshotLabel,
+    accounts: db.accounts.map((a) => ({
+      account_id: a.account_id,
+      account_name: a.account_name,
+      plan: a.plan,
+      hasAgreement: Boolean(a.contract_file),
+    })),
+  });
 });
 
 app.get('/api/accounts/:accountId/data', (req, res) => {
+  const ctx = normalizeContext(
+    { userType: req.query.userType, accountId: req.query.accountId, userId: req.query.userId },
+    'anonymous',
+  );
   const { accountId } = req.params;
-  const account = accounts.get(accountId);
-  
-  if (!account) {
-    return res.status(404).json({ error: 'Account not found' });
+  const account = db.accounts.find((a) => a.account_id === accountId);
+
+  const check = canReadRecord(ctx, account ? { accountId: account.account_id } : undefined);
+  if (!check.allowed) {
+    return res.status(403).json({ error: 'access_denied', message: check.reason });
   }
-  
-  res.json({ account, operationalDataAvailable: Object.keys(operationalData).length > 0 });
+  if (!account) return res.status(404).json({ error: 'not_found' });
+
+  res.json({
+    account,
+    orders: db.orders.filter((o) => o.account_id === accountId).length,
+    tickets: db.tickets.filter((t) => t.account_id === accountId).length,
+    documents: kb.listReadable(ctx).map((d) => d.name),
+  });
 });
 
-const PORT = process.env.PORT || 3001;
+/**
+ * Serve the built client from the same process, so the deployed app is a single service on
+ * a single URL. Registered after the API routes so it can never shadow them.
+ */
+function resolveClientDist(): string | null {
+  for (const c of [
+    path.join(HERE, '..', 'client', 'dist'), // running the build from dist/
+    path.join(HERE, 'client', 'dist'), // running from source with tsx
+  ]) {
+    if (fs.existsSync(path.join(c, 'index.html'))) return path.resolve(c);
+  }
+  return null;
+}
+
+const CLIENT_DIST = resolveClientDist();
+
+if (CLIENT_DIST) {
+  app.use(express.static(CLIENT_DIST));
+  // SPA fallback: anything that is not an API route returns index.html.
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+  });
+  console.log(`[boot] serving UI from ${CLIENT_DIST}`);
+} else {
+  console.log('[boot] no client build found — run "npm run build:client" to serve the UI');
+}
+
+const PORT = Number(process.env.PORT) || 3001;
 app.listen(PORT, () => {
   console.log(`ParcelPilot AI Support Server running on port ${PORT}`);
-  console.log('Available endpoints: /api/chat, /api/confirm-action, /api/health');
+  console.log('Endpoints: /api/chat, /api/confirm-action, /api/health, /api/accounts');
+  if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY.startsWith('your_')) {
+    console.warn('[warn] OPENAI_API_KEY is not set — /api/chat will return 503.');
+  }
 });
 
-export { app };
+export { app, kb, db };
