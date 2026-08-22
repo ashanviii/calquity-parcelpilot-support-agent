@@ -168,6 +168,14 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
+/* Persona is held while an answer is in flight — switching mid-request would drop the
+   reply into the cleared transcript under the wrong persona. */
+.mode-switch button:disabled,
+.account-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* The native select arrow is drawn inside the control's padding box, so long
    option text runs straight into it. Suppress it and draw our own with real
    space reserved on the right. */

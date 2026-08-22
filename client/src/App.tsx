@@ -116,6 +116,15 @@ function App() {
       .catch(() => setAccounts([]));
   }, []);
 
+  // Switching persona starts a new session. The transcript is posted back to /api/chat as
+  // `history` and replayed into the model verbatim, so carrying it across a switch would let
+  // a staff answer about one account surface inside another account's customer session. The
+  // tools stay locked down either way, but the prior text would still be sitting in context.
+  useEffect(() => {
+    setMessages([]);
+    setExpandedTrace({});
+  }, [userType, accountId]);
+
   const buildContext = () => ({
     userId: 'user-123',
     userType,
@@ -254,6 +263,9 @@ function App() {
               className={userType === 'customer' ? 'is-active' : ''}
               onClick={() => setUserType('customer')}
               aria-pressed={userType === 'customer'}
+              // An in-flight answer would land in the cleared transcript under the new
+              // persona, so hold the switch until it settles.
+              disabled={loading}
             >
               Customer
             </button>
@@ -262,6 +274,7 @@ function App() {
               className={userType === 'support_staff' ? 'is-active' : ''}
               onClick={() => setUserType('support_staff')}
               aria-pressed={userType === 'support_staff'}
+              disabled={loading}
             >
               Support staff
             </button>
@@ -273,6 +286,7 @@ function App() {
               value={accountId}
               onChange={(e) => setAccountId(e.target.value)}
               aria-label="Signed in as account"
+              disabled={loading}
             >
               {visibleAccounts.map((a) => (
                 <option key={a.account_id} value={a.account_id}>
