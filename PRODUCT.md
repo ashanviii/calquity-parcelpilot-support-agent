@@ -67,7 +67,9 @@ build, and *What Was Intentionally Left Out*.
 
 ### 2. Four Tools with Clear Separation
 
-**Decision:** Document search, data lookup, state-changing actions.
+**Decision:** Document search, structured-data lookup, case-fact calculation, and
+state-changing actions. The brief required three; calculation was split out from lookup so
+that retrieving a record and reasoning about it stay separate concerns.
 
 **Why:**
 - Each tool has distinct responsibility
@@ -153,9 +155,12 @@ build, and *What Was Intentionally Left Out*.
    - Clear explanation of why escalation needed
 
 4. **Role-Based Interfaces**
-   - Customer sees simplified interface
-   - Support staff sees full operational data
-   - Same backend, different UX
+   - Same chat surface, different capabilities: customers pick an account and get
+     customer-appropriate suggested questions; staff get investigation-shaped ones and the
+     confirm/reject controls for proposed actions
+   - Switching persona clears the transcript, so a staff answer about one account cannot
+     sit in context during a customer session
+   - Same backend; the difference is enforced server-side, not by hiding UI
 
 ### Recommended Future Builds
 
@@ -238,12 +243,12 @@ build, and *What Was Intentionally Left Out*.
    - Flag answers for retraining
    - Public explanation of corrections
 
-**Implementation Approach:**
-- Add confidence metadata to all responses
-- Implement BLEU/ROUGE scoring vs policy documents
-- Support staff rating system (database)
-- Retraining pipeline based on feedback
-- Visualization dashboard
+6. **Implementation Approach:**
+   - Add confidence metadata to all responses
+   - Implement BLEU/ROUGE scoring vs policy documents
+   - Support staff rating system (database)
+   - Retraining pipeline based on feedback
+   - Visualization dashboard
 
 #### Phase 4: Operational Intelligence (Priority 3)
 
@@ -352,6 +357,15 @@ build, and *What Was Intentionally Left Out*.
 - Reason: the audit trail is the part that matters for the confirmation flow, and its shape
   is settled; the storage behind it is not interesting at this scale
 - Production: append-only table, since this is the record of who authorised what
+
+### 8. An Answer-Quality Evaluation Set
+- Current: `verify.ts` covers mechanics — access control, ranking order, the arithmetic —
+  but not whether the agent's *answers* are right
+- Reason: the mechanics are what regress silently; answer quality was checked by hand
+  against the pack's own examples
+- Next: a scored set of question/expected-answer pairs, especially paraphrases that avoid
+  the documents' vocabulary, since that is exactly where BM25 is weakest. Without it,
+  there is no way to tell whether a prompt change helped or hurt.
 
 ## Metrics to Judge Product Success
 

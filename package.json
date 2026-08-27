@@ -11,7 +11,7 @@
     "build:server": "tsc -p tsconfig.json",
     "build:client": "cd client && npm run build",
     "start": "node dist/server.js",
-    "test": "vitest",
+    "test": "npm run verify",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "tsx scripts/verify.ts"
   },

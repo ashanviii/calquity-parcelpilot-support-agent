@@ -2,18 +2,31 @@
 
 An AI-powered customer support and operations system for ParcelPilot logistics platform. Built with TypeScript, Express, React, and LangChain (`@langchain/openai` tool calling).
 
-## Features
+## What It Does
 
-✅ **Dual-context chatbot** - Customer-facing and internal staff support modes
-✅ **3+ Specialized Tools**:
-  - Document search/retrieval across policies and agreements
-  - Structured data lookup with access control
-  - State-changing actions (escalations, ticket updates)
+**Dual-context chatbot.** Customer-facing and internal staff modes on the same backend,
+with different permissions and different data in scope.
 
-✅ **Access Control** - Role-based data access for customers vs staff
-✅ **Multi-step Reasoning** - Complex queries spanning multiple tools and sources
-✅ **Confirmation Workflow** - User confirmation required for state changes
-✅ **Source Reliability Tracking** - Distinguishes high/medium/low reliability sources
+**Four tools**, which the model chooses between:
+
+| Tool | Purpose |
+|---|---|
+| `document_search` | BM25 over the pack PDFs and past ticket resolutions, ranked by source authority |
+| `data_lookup` | Account, order and ticket records; access control enforced here |
+| `compute_case_facts` | Cancellation timing, pickup delay, fee percentages, ticket age — facts only, never the decision |
+| `create_escalation` | Proposes a state change; never executes without separate confirmation |
+
+**Access control at the tool layer.** Every tool re-checks the caller's context. Nothing
+relies on the model having respected the system prompt.
+
+**Multi-step reasoning.** The agent loop runs up to 6 iterations, chaining tools until it
+can answer, and returns an honest "handing this to a human" if it exhausts the budget.
+
+**Confirmation before any state change.** Proposals return an `actionId`; a separate
+endpoint executes it. Staff only, and an action cannot be replayed.
+
+**Source authority is explicit.** Every answer shows which documents were cited, their
+reliability, and whether one is superseded or is the asking account's own agreement.
 
 ## Project Structure
 
@@ -63,7 +76,7 @@ parcelpilot-ai-support/
 
 ### Prerequisites
 
-- Node.js 16+ and npm
+- Node.js 20+ and npm
 - OpenAI API key
 - Git
 
@@ -318,54 +331,48 @@ The system uses the following documents from the assessment data pack:
    - Order information
    - Ticket history
 
-## Addressing Additional Requirements
+## The Two Additional Client Problems
 
-### Proactive Issue Detection
-This system includes infrastructure for:
-- Flagging high-severity tickets near SLA
-- Identifying unusual patterns in support activity
-- Detecting recurring issues across multiple customers
-- Future: ML-based anomaly detection
+### Problem 2: Trust and Reliability — addressed
 
-### Trust and Reliability
-- Source reliability scores (high/medium/low)
-- Explicit conflict handling for policy overrides
-- Clear uncertainty messaging
-- Escalation recommendations for complex cases
+This is where the work went. The pack is deliberately inconsistent, so source authority is
+treated as a first-class concern rather than a prompt instruction:
 
-## Deployment Options
+- Every passage carries authority metadata: reliability, effective date, supersession, and
+  the account a contract belongs to. Ranking is
+  `BM25 × authority × supersession × contract-boost`, so precedence is enforced in
+  retrieval, not merely requested of the model.
+- Deprecated policy and past ticket resolutions stay searchable and down-weighted rather
+  than hidden, so the agent can name a conflict instead of silently ignoring it.
+- `compute_case_facts` returns timing and money facts but never decides an outcome. The
+  rule has to come from a retrieved document.
+- Retrieval returning nothing produces "not covered by the supplied documents, escalating"
+  rather than an invented figure.
 
-### Vercel/Netlify (Frontend)
-```bash
-cd client
-npm run build
-# Deploy the dist folder
-```
+Full reasoning in PRODUCT.md.
 
-### Railway/Render (Backend)
-```bash
-npm run build
-npm start
-```
+### Problem 1: Proactive Issue Detection — not built
 
-Set `OPENAI_API_KEY` environment variable.
+Deliberately out of scope. The pack holds 4 accounts and 7 tickets: enough to *display* a
+recurring-issue dashboard, not enough for clustering or anomaly detection to mean anything.
+I chose to go deep on one problem rather than shallow on both. PRODUCT.md lists it as the
+highest-priority next build.
 
-## Future Enhancements
 
-1. **Vector embeddings** for semantic document search (Pinecone/Weaviate)
-2. **Persistent chat history** with PostgreSQL
-3. **Real-time notifications** for urgent issues
-4. **Analytics dashboard** for support metrics
-5. **Webhook integration** for automatic escalation routing
-6. **Fine-tuned models** for domain-specific responses
-7. **Multi-language support**
-8. **Mobile app** with push notifications
+## What I Would Build Next
+
+Prioritised with reasoning in PRODUCT.md. Short version: proactive issue detection first,
+then a persistent action ledger, then hybrid retrieval once the corpus outgrows BM25.
 
 ## Testing
 
 ```bash
-npm test
+npm run verify
 ```
+
+35 checks over the real data pack, no API key required: access control (cross-account
+denial, scope-widening attempts), retrieval authority ordering, the derived calculations
+against known records, and the confirm-before-execute contract. Exits non-zero on failure.
 
 ## Troubleshooting
 
@@ -382,10 +389,6 @@ PORT=3002 npm run dev:server
 **Missing data files:**
 - Ensure data pack files are in the correct location
 - Update paths in server.ts if needed
-
-## Support
-
-For issues or questions, please refer to the assessment guidelines or contact ParcelPilot team.
 
 ## License
 

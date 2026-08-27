@@ -47,12 +47,17 @@ The ParcelPilot AI Support System is a multi-context chatbot serving both custom
 
 ### Core Components
 
-#### 1. Query Understanding Layer
-- Parses user input to determine:
-  - Query type (informational, action-based, escalation)
-  - Required context (account, order, ticket)
-  - Confidence level needed
-  - Applicable policies/agreements
+#### 1. Query Understanding
+
+There is no separate parsing layer. Query understanding is the model's job: it receives the
+system prompt, the last 10 turns of history, and four typed tool schemas, then decides which
+tools to call and with what arguments. The system prompt supplies the domain constraints —
+source precedence, when to escalate, and the rule that a fee or SLA target must come from a
+retrieved document rather than from memory.
+
+The deliberate choice here is what is *not* left to the model: access control, source
+authority weighting, and the facts/rules split are all enforced in code, because a prompt
+instruction is a request and a tool check is a guarantee.
 
 #### 2. Tool Selection Logic
 The agent selects from four tools. The brief requires at least three; calculation was split
@@ -160,21 +165,41 @@ Agent escalates when:
 
 Access control is enforced at the **tool layer**, not model instructions:
 
+Three functions in `src/access.ts` are the only enforcement points, and every tool calls
+one of them before returning data:
+
 ```typescript
-// Pseudocode
-function enforceAccessControl(user: User, resource: Resource) {
-  if (user.type === 'customer') {
-    // Only allow access to own account data
-    if (resource.accountId !== user.accountId) {
-      throw AccessDeniedError();
-    }
-  } else if (user.type === 'support_staff') {
-    // Support staff can access all operational data
-    return true;
+export function canReadRecord(
+  ctx: AccessContext,
+  record: { accountId?: string } | undefined,
+): AccessDecision {
+  if (isStaff(ctx)) return ALLOW;
+  if (!ctx.accountId) return { allowed: false, reason: 'No account scope on this session.' };
+  if (!record?.accountId) return { allowed: false, reason: 'Record is not account-scoped.' };
+  if (record.accountId !== ctx.accountId) {
+    return { allowed: false, reason: 'Record belongs to a different account.' };
   }
-  // Other roles handled similarly
+  return ALLOW;
 }
 ```
+
+- `canReadDocument` — customers see public policy plus their own account's contract;
+  internal documents and other accounts' agreements are filtered out of retrieval before
+  ranking, so an unauthorised passage never reaches the model's context at all.
+- `canReadRecord` — record-level scoping, above.
+- `canPerformAction` — state changes are staff-only.
+
+A second control sits in `normalizeContext`: a customer's `accountId` is pinned to the one
+they are authenticated as, and staff sessions have `accountId` dropped entirely. This is
+what stops scope-widening through the tool arguments — a customer passing
+`{ resource: 'order', accountId: 'ACCT-001' }` has that argument ignored, because `scope`
+resolves from the context rather than the argument for non-staff callers. `verify.ts`
+tests this case explicitly.
+
+**A note on what this does not cover.** Authentication itself is mocked: the context
+arrives in the request body, as the brief permits. In production the context would come
+from a verified JWT claim. The enforcement *point* would not move — only its source — which
+is the reason it lives in the tool layer rather than the transport.
 
 ### User Types & Permissions
 
@@ -291,10 +316,9 @@ policy when its sources are unavailable is worse than one that does not start.
 - Native ESM support
 - TypeScript out of the box
 
-**Why React:**
-- Component reusability
-- Large ecosystem (UI libraries, etc.)
-- Developer familiar with patterns
+**Why React:** 
+- the interface needed expandable per-message tool traces and inline
+confirm/reject controls whose state has to survive re-renders. Component state is the natural fit. The framework choice is not load-bearing here — any of React, Vue or Svelte would have worked.
 
 **Alternative:**
 - Vue, Svelte for smaller bundles
@@ -330,23 +354,27 @@ policy when its sources are unavailable is worse than one that does not start.
 └────────────────────┘
 ```
 
-### Production (Recommended)
+### Production (as deployed)
+
+One service, one URL — the same Node process serves the API and the built UI.
 
 ```
-┌───────────────────────────────────────┐
-│ Vercel / Netlify / S3                 │
-│ (React Build)                         │
-│ Domain: https://parcelpilot-ai.com    │
-└─────────────────┬─────────────────────┘
-                  │
-                  │ HTTPS
-                  ▼
-┌───────────────────────────────────────┐
-│ Railway / Render / AWS Lambda         │
-│ (Express Server)                      │
-│ Domain: https://api.parcelpilot.com   │
-│ Env: OPENAI_API_KEY, DATABASE_URL     │
-└───────────────────────────────────────┘
+                    ┌──────────────────────┐
+                    │       RENDER         │
+                    │    Single Service    │
+                    ├──────────────────────┤
+                    │                      │
+        /api/* ────▶│   Express API        │
+                    │                      │
+          /* ──────▶│   React Static Build │
+                    │                      │
+                    ├──────────────────────┤
+                    │ ENV:                 │
+                    │ OPENAI_API_KEY       │
+                    │                      │
+                    │ Health:              │
+                    │ /api/health          │
+                    └──────────────────────┘
 ```
 
 ## Security Considerations
@@ -356,22 +384,30 @@ policy when its sources are unavailable is worse than one that does not start.
    - Never committed to version control
 
 2. **Data Access**:
-   - Access control enforced per request
-   - No privilege escalation possible
+   - Access control enforced inside each tool, on every call
+   - Customer scope is derived from session context, never from tool arguments
+   - Authentication is mocked per the brief; a caller who can forge the request body can
+     forge a role. Production would source the context from a verified JWT claim, without
+     moving the enforcement point.
 
 3. **Input Validation**:
-   - User queries sanitized
-   - Parameter validation on all API calls
+   - Tool arguments are typed with zod schemas, which double as the OpenAI function schemas
+   - `normalizeContext` coerces the request context into a shape the server is willing to
+     act on, rather than trusting it
+   - `/api/chat` rejects a missing or unknown `accountId` on a customer session
 
 4. **Rate Limiting**:
-   - Should implement in production
-   - Prevent abuse of API
+   - Implemented: 25 messages per IP per 10-minute window on `/api/chat`
+     (`RATE_LIMIT_PER_WINDOW`), which caps how fast a public demo URL can spend the API key
+   - In-memory, so it resets on restart and does not coordinate across instances
 
 5. **Logging**:
    - Query logs for audit trail
    - Sensitive data excluded from logs
 
 ## Monitoring & Observability
+
+None of this is implemented. It is what I would instrument first, in this order.
 
 ### Metrics to Track
 
@@ -401,18 +437,32 @@ policy when its sources are unavailable is worse than one that does not start.
 - OpenTelemetry for tracing
 - Integration with monitoring service (DataDog, New Relic)
 
+## Known Limitations
+
+Stated plainly, because a support system's credibility depends on it being honest about
+what it does not do.
+
+- **No persistence.** Documents, records and the action ledger are all in memory. A restart
+  loses the audit trail of who authorised what, which is the part that would matter first
+  in production.
+- **Single instance required.** A consequence of the above; see the deployment section.
+- **Mocked authentication.** The request context is trusted. Enforcement is in the right
+  place, but its input is not yet verified.
+- **Lexical retrieval only.** A question phrased entirely outside the documents' vocabulary
+  will miss. Acceptable at ~25 passages; the first thing to revisit as the corpus grows.
+- **Conversation history is client-supplied** and replayed into the model. Forged history
+  cannot unlock data, because every tool re-checks access on every call, but it could
+  influence tone. Server-side session storage would close this.
+- **No answer-quality evaluation set.** `verify.ts` tests the mechanics — access control,
+  ranking order, arithmetic — but there is no scored set of question/expected-answer pairs
+  measuring whether the agent actually resolves precedence correctly across many phrasings.
+  This is the gap I would close first, because it is the only way to know whether a prompt
+  change made things better or worse.
+
 ## Conclusion
 
-This architecture balances production-readiness with assessment requirements:
-
-✅ Enforces access control at tool layer
-✅ Tracks source reliability explicitly
-✅ Supports complex multi-step queries
-✅ Requires confirmation for actions
-✅ Easy to extend with new tools
-✅ Clear separation of concerns
-✅ Scalable to production deployment
-
-Future iterations would add hybrid retrieval, persistent storage for the action ledger, and
-the operational tooling described in the Product Note. The current foundation supports
-these without rework.
+The load-bearing decisions are: access control enforced in tools rather than instructions,
+source precedence enforced in ranking rather than requested in the prompt, and a facts/rules
+split that makes it structurally harder for the model to shortcut either. Everything above
+in the limitations list is a known cost, chosen against the size of this data pack, and none
+of it requires reworking those three decisions to fix.

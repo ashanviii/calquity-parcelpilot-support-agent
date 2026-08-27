@@ -7,7 +7,7 @@ echo ""
 
 # Check Node.js
 if ! command -v node &> /dev/null; then
-    echo "❌ Node.js not found. Please install Node.js 16+ first."
+    echo "❌ Node.js not found. Please install Node.js 20+ first."
     exit 1
 fi
 

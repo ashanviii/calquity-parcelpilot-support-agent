@@ -1,8 +1,21 @@
 # Deployment Guide: ParcelPilot AI Support
 
+The app deploys as **one service on one URL**. The same Node process serves the API and the
+built React UI.
+
+This is a constraint rather than a convenience. Proposed actions live in an in-memory map
+between the message that proposes one and the request that confirms it, so the app must run
+as a single long-lived instance. Splitting the frontend onto a CDN and the backend across
+serverless functions breaks the confirmation flow: a confirm request could land on an
+instance that never saw the proposal. Making the action ledger persistent is what would
+unlock horizontal scaling, and it is the first thing listed in the Product Note's future
+work.
+
+---
+
 ## Local Development
 
-### Quick Start (Recommended)
+### Quick start
 
 ```bash
 chmod +x quick-start.sh
@@ -10,327 +23,148 @@ chmod +x quick-start.sh
 npm run dev
 ```
 
-Then open: http://localhost:3000
+Then open http://localhost:3000.
 
-### Manual Setup
+### Manual setup
 
-1. **Install dependencies**
 ```bash
 npm install
 cd client && npm install && cd ..
-```
 
-2. **Configure environment**
-```bash
 cp .env.example .env
-# Edit .env with your OPENAI_API_KEY
-```
+# add your OPENAI_API_KEY
 
-3. **Run development server**
-```bash
 npm run dev
 ```
 
-Access at:
-- Frontend: http://localhost:3000
+- Frontend (Vite dev server): http://localhost:3000
 - Backend API: http://localhost:3001
 
-## Docker Deployment
-
-### Build and Run
+### Verifying without an API key
 
 ```bash
-# Build Docker image
-docker build -t parcelpilot-ai:latest .
-
-# Run container
-docker run -p 3001:3001 \
-  -e OPENAI_API_KEY=your_key_here \
-  -e PORT=3001 \
-  parcelpilot-ai:latest
+npm run verify
 ```
 
-### Docker Compose
+Runs the checks in `scripts/verify.ts` against the real data pack — access control,
+retrieval authority ordering, the derived calculations, and the confirm-before-execute
+contract. No model call, so no key needed. Exits non-zero on failure.
+
+### Production build, locally
 
 ```bash
-docker-compose up --build
+npm run build     # compiles the server to dist/ and builds the client
+npm start         # serves both from a single process
 ```
 
-Access at http://localhost:3000
+---
 
-## Cloud Deployment Options
+## Environment
 
-### Option 1: Railway (Recommended - Easiest)
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | yes | The key the agent calls with. The account needs available quota. |
+| `OPENAI_MODEL` | no | Defaults to `gpt-4o`. Plain `gpt-4` is not enabled on all keys. |
+| `OPENAI_BASE_URL` | no | Point at Azure OpenAI, a gateway, or any OpenAI-compatible endpoint. |
+| `PARCELPILOT_DATA_DIR` | no | Folder holding the assessment pack. Defaults to `./data`. |
+| `PORT` | no | Defaults to 3001. |
+| `RATE_LIMIT_PER_WINDOW` | no | Messages per IP per 10 minutes on `/api/chat`. Defaults to 25. |
 
-1. **Push to GitHub**
-```bash
-git push origin main
-```
+The `.env` file is gitignored. `.env.example` carries placeholders only.
 
-2. **Create Railway Project**
-   - Visit https://railway.app
-   - Connect GitHub repository
-   - Select root directory
-   - Add environment variables:
-     - OPENAI_API_KEY: your-key
-     - PORT: 3001
-     - NODE_ENV: production
+### The data pack
 
-3. **Deploy**
-   - Railway auto-deploys on push
-   - Get public URL from Railway dashboard
+The supplied pack — six PDFs plus `ParcelPilot_Assessment_Data.xlsx` — ships in `data/` and
+is parsed at startup. There is no synthetic fallback: if the pack is missing, the server
+**fails to boot** rather than starting with placeholder content. A support agent that
+invents a policy when its sources are unavailable is worse than one that does not start.
 
-### Option 2: Vercel (Frontend) + Railway (Backend)
+---
 
-**Frontend on Vercel:**
-```bash
-cd client
-npm install -g vercel
-vercel deploy --prod
-```
+## Deploying to Render
 
-**Backend on Railway:**
-```bash
-# Same as Option 1
-```
+`render.yaml` is a blueprint, so most of this is automatic.
 
-Then configure frontend to point to Railway backend URL.
+1. Push the repo to GitHub
+2. Render → **New → Blueprint** → select the repo
+3. Render prompts for `OPENAI_API_KEY` (marked `sync: false`, so it never enters the repo)
 
-### Option 3: AWS Lambda + S3 + CloudFront
+The blueprint supplies the build and start commands, the health check path, and the free
+plan's single instance. The data pack is committed, so there is nothing else to upload.
 
-**Frontend (S3 + CloudFront):**
-```bash
-cd client && npm run build
+### Doing it manually instead
 
-# Upload dist/ to S3
-# Configure CloudFront to serve from S3
-```
+| Setting | Value |
+|---|---|
+| Build command | `npm install && npm --prefix client install && npm run build` |
+| Start command | `npm start` |
+| Health check path | `/api/health` |
+| Environment | `OPENAI_API_KEY`, `NODE_VERSION=20` |
 
-**Backend (Lambda):**
-```bash
-# Create Lambda function from Dockerfile
-# Or package Node.js code directly
+Do not set `numInstances` in `render.yaml`. Scaling is a paid feature and the free plan
+rejects the field, which fails the whole blueprint. Free is a single instance anyway, which
+is what the in-memory action ledger needs.
 
-# Set up API Gateway for HTTP requests
-# Configure environment variables
-```
+### Before sharing a public link
 
-### Option 4: Heroku
+- **Set a spend limit** on the OpenAI account. The URL is public and every message costs
+  money.
+- Confirm the rate limit is in force: `/api/chat` allows 25 messages per IP per 10-minute
+  window by default.
 
-```bash
-# Install Heroku CLI
-heroku login
+---
 
-# Create app
-heroku create parcelpilot-ai-support
-
-# Set config
-heroku config:set OPENAI_API_KEY=your_key_here
-
-# Deploy
-git push heroku main
-
-# View logs
-heroku logs -t
-```
-
-### Option 5: Google Cloud Run
+## Health Check
 
 ```bash
-# Build and push to Container Registry
-gcloud builds submit --tag gcr.io/PROJECT_ID/parcelpilot-ai
-
-# Deploy
-gcloud run deploy parcelpilot-ai \
-  --image gcr.io/PROJECT_ID/parcelpilot-ai \
-  --platform managed \
-  --region us-central1 \
-  --set-env-vars OPENAI_API_KEY=your_key \
-  --allow-unauthenticated
+curl https://<your-app>/api/health
 ```
 
-## Production Checklist
+Reports the model in use, whether a key is configured, and whether the knowledge base and
+operational data were loaded from the real pack. Useful as the first thing to check when
+the app is up but answers look wrong — a health check that says the pack loaded but the
+agent still cannot answer points at the key or the quota, not the data.
 
-- [ ] OPENAI_API_KEY set in environment (not .env)
-- [ ] NODE_ENV=production
-- [ ] CORS properly configured for production domain
-- [ ] Rate limiting enabled
-- [ ] Logging configured (structured JSON logs)
-- [ ] Error monitoring set up (Sentry, DataDog)
-- [ ] Database configured if adding persistence
-- [ ] SSL/TLS certificate configured
-- [ ] Domain DNS pointing to deployment
-- [ ] Health checks configured
-- [ ] Auto-scaling configured (if high traffic expected)
-- [ ] Monitoring and alerting set up
+---
 
-## Environment Variables
+## Troubleshooting
 
-```bash
-# Required
-OPENAI_API_KEY=sk-...
+**`503 agent_unavailable`** — the model could not be reached. The `message` field says which
+of: missing or rejected key, exhausted quota, rate limit, or a model not enabled on the key.
+`src/agent.ts` maps these deliberately, because a bare `internal_error` on an unpaid account
+sends people hunting through their own code.
 
-# Optional
-PORT=3001                          # Default: 3001
-NODE_ENV=production                # Default: development
-LOG_LEVEL=info                     # Default: info
-CORS_ORIGIN=https://example.com   # Default: *
-```
+**Server exits at startup with a data-pack error** — the pack is not where the server is
+looking. Set `PARCELPILOT_DATA_DIR` to the folder holding the PDFs and the workbook.
 
-## Health Checks
+**Port already in use** — `PORT=3002 npm run dev:server`.
 
-```bash
-# Check backend is running
-curl http://localhost:3001/api/health
+**CORS errors in local dev** — the backend must be running on 3001. In the deployed build
+there is no cross-origin request at all, since one process serves both.
 
-# Check frontend is accessible
-curl http://localhost:3000
-```
+**Confirming an action returns 404** — pending actions are in memory and are lost on
+restart. If the server restarted between the proposal and the confirmation, the `actionId`
+no longer exists. This is the known limitation described at the top of this file.
 
-## Monitoring
+---
 
-### Key Metrics to Track
+## What Is Not Implemented
 
-- API response times
-- Error rates
-- OpenAI token usage/cost
-- Support escalation rate
-- Uptime (SLA target: 99.9%)
+Listed here so the guide is not mistaken for a description of the current system.
 
-### Recommended Tools
+**Persistence.** No database. Documents, records and the action ledger are all in memory. In
+production the ledger would move to an append-only table first, since it is the record of
+who authorised what.
 
-- **Logging**: CloudWatch, Datadog, or Papertrail
-- **Monitoring**: New Relic, Datadog, or Prometheus
-- **Error Tracking**: Sentry
-- **APM**: Datadog or New Relic
+**Structured logging and tracing.** Currently `console.log`. Would move to Pino with
+OpenTelemetry spans around each tool call — the trace object the UI already renders is most
+of what a span would carry.
 
-## Scaling Considerations
+**Metrics.** The ones worth having, in order: corrected-answer rate (see the Product Note),
+escalation rate, tool error rates, token spend per conversation, and p95 latency.
 
-### Bottlenecks (in order)
+**Caching, autoscaling, CDN.** All premature at this size, and the first two are blocked on
+persistence anyway.
 
-1. **OpenAI API rate limits**
-   - Solution: Queue requests, implement caching
-   - Cache: Redis with TTL for policy questions
-
-2. **LLM response latency**
-   - Solution: Add streaming responses
-   - Parallel tool calling where possible
-
-3. **Database queries**
-   - Solution: Connection pooling, read replicas
-   - Caching layer for operational data
-
-4. **Concurrent user connections**
-   - Solution: Horizontal scaling (Kubernetes)
-   - Load balancing with sticky sessions
-
-### Deployment Architecture (High-Traffic)
-
-```
-┌─────────────────────────┐
-│    Cloudflare/CDN       │
-│  (Caching, WAF)         │
-└────────────┬────────────┘
-             │
-┌────────────▼────────────┐
-│   Load Balancer         │
-│  (AWS ELB/ALB)          │
-└────────────┬────────────┘
-             │
-    ┌────────┼────────┐
-    │        │        │
-┌───▼─┐  ┌──▼──┐  ┌──▼──┐
-│ App │  │ App │  │ App │  (Kubernetes cluster)
-│ Pod │  │ Pod │  │ Pod │  (Auto-scaling)
-└─────┘  └─────┘  └─────┘
-    │        │        │
-    └────────┼────────┘
-             │
-    ┌────────▼────────┐
-    │   Redis Cache   │
-    │ (Session, Data) │
-    └─────────────────┘
-             │
-    ┌────────▼────────┐
-    │   PostgreSQL    │
-    │ (Main Database) │
-    └─────────────────┘
-```
-
-## Rollback Procedure
-
-```bash
-# If deployment fails, rollback to previous version
-
-# Railway
-railway rollback [previous-deployment-id]
-
-# Heroku
-heroku releases:rollback v3
-
-# Manually
-git revert HEAD
-git push
-```
-
-## Support and Troubleshooting
-
-### Common Issues
-
-**502 Bad Gateway**
-- Backend not running
-- Backend port not exposed
-- Firewall blocking access
-
-**CORS errors**
-- Check CORS_ORIGIN environment variable
-- Ensure frontend and backend domains are different
-- Check browser console for specific error
-
-**Slow responses**
-- Check OpenAI API quota
-- Monitor database query performance
-- Check network latency
-
-**High costs**
-- Monitor token usage with `npm run monitor`
-- Implement caching for repeated queries
-- Consider fine-tuned model for domain-specific queries
-
-## Performance Optimization
-
-### Caching Strategy
-
-```javascript
-// Cache policy question responses (24 hours)
-const policyCache = new Map();
-const POLICY_CACHE_TTL = 24 * 60 * 60 * 1000;
-
-// Cache operational data (5 minutes)
-const dataCache = new Map();
-const DATA_CACHE_TTL = 5 * 60 * 1000;
-```
-
-### Lazy Loading
-
-- Load data sources on demand
-- Stream long responses to client
-- Paginate ticket history
-
-### Cost Optimization
-
-- Use GPT-3.5-turbo for simple queries
-- GPT-4 for complex reasoning only
-- Implement query caching
-- Batch similar requests
-
-## Support
-
-For issues with deployment, check:
-1. Environment variables are set correctly
-2. Network connectivity to external services
-3. OpenAI API key is valid
-4. Database connectivity (if using persistence)
-5. Application logs for detailed error messages
-
-Monitor the system and adjust autoscaling policies based on actual traffic patterns.
+**Docker.** There is no Dockerfile in this repo. The Render blueprint uses the native Node
+runtime.

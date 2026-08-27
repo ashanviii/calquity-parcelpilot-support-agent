@@ -16,7 +16,7 @@ loop — which needed decisions rather than completions.
 
 Used for the substantive build, in a working session rather than as autocomplete:
 
-- **Diagnosing the scaffold.** The first version looked complete and was not: `runAgent()`
+- **Diagnosing the scaffold.** The first version, which I had scaffolded with Copilot, looked complete and was not: `runAgent()`
   built a system prompt, never sent it anywhere, and returned a hardcoded object, so every
   question produced the same reply. Verified by curling the running server with two
   unrelated questions and getting byte-identical responses.
@@ -27,7 +27,7 @@ Used for the substantive build, in a working session rather than as autocomplete
 - **Fixing access control.** The original check compared `resourceId.startsWith(accountId)`
   — `"ORD-1001"` against `"ACCT-001"` — which denied every legitimate customer lookup while
   appearing to be a security control.
-- **Writing `scripts/verify.ts`** — 35 checks over the real pack covering access control,
+- **Writing `scripts/verify.ts`** — 42 checks over the real pack covering access control,
   retrieval ordering, the calculations, and the confirm-before-execute contract.
 - **Reviewing these notes against the code**, which is how the inaccuracies described below
   were found.
