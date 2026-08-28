@@ -7,40 +7,46 @@ The ParcelPilot AI Support System is a multi-context chatbot serving both custom
 ## High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Frontend (React)                             │
-│  - Chat Interface                                                │
-│  - User Context Selection (Customer/Staff/Operations)            │
-│  - Tool Visibility & Action Confirmation                         │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ HTTP/REST
-┌──────────────────────────▼──────────────────────────────────────┐
-│                 Backend API (Express)                            │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │   Agent Loop (custom, on LangChain tool primitives)      │   │
-│  │  - Model picks tools; loop executes and feeds back       │   │
-│  │  - Multi-step orchestration, max 6 iterations            │   │
-│  │  - Confidence & Escalation Decisions                     │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                          │                                        │
-│        ┌─────────────────┼─────────────────┐                    │
-│        │                 │                 │                    │
-│        ▼                 ▼                 ▼                    │
-│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌──────────────┐  │
-│  │ Document  │ │ Structured│ │ Case Fact │ │State-Changing│  │
-│  │ Search    │ │ Data      │ │ Calculation│ │Actions      │  │
-│  │           │ │ Lookup    │ │(timing/fee)│ │(confirmed)  │  │
-│  └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └──────┬───────┘  │
-└─────────┼──────────────────┼────────────────┼────────────────────┘
-          │                  │                │
-        ┌─▼──────────┐   ┌──▼────────────┐   │
-        │ Documents  │   │ Operational   │   └──► Access Control
-        │            │   │ Data          │        Layer
-        │ PDFs       │   │               │
-        │ (reliability│   │ - Accounts    │
-        │  scored)   │   │ - Orders      │
-        └────────────┘   │ - Tickets     │
-                         └───────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Frontend (React)                             │
+│  - Chat interface                                                   │
+│  - Context selection (Customer / Support / Operations)              │
+│  - Tool trace visibility & action confirmation                      │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │ HTTP / REST
+┌──────────────────────────────▼──────────────────────────────────────┐
+│                       Backend API (Express)                         │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │      Agent Loop (custom, on LangChain tool primitives)        │  │
+│  │  - Model picks tools; loop executes and feeds results back    │  │
+│  │  - Multi-step orchestration, max 6 iterations                 │  │
+│  │  - Escalation decisions                                       │  │
+│  └───────────────────────────────┬───────────────────────────────┘  │
+│                                  │ every tool call                  │
+│  ┌───────────────────────────────▼───────────────────────────────┐  │
+│  │           Access Control Layer  (src/access.ts)               │  │
+│  │  canReadDocument · canReadRecord · canPerformAction           │  │
+│  └───────────────────────────────┬───────────────────────────────┘  │
+│                                  │                                  │
+│      ┌──────────────┬────────────┴────────┬──────────────┐          │
+│      ▼              ▼                     ▼              ▼          │
+│ ┌──────────┐  ┌──────────┐  ┌──────────────────┐  ┌───────────────┐ │
+│ │ Document │  │Structured│  │    Case Fact     │  │ State-Changing│ │
+│ │  Search  │  │   Data   │  │   Calculation    │  │    Actions    │ │
+│ │  (BM25)  │  │  Lookup  │  │  (timing / fee)  │  │  (confirmed)  │ │
+│ └────┬─────┘  └────┬─────┘  └────────┬─────────┘  └───────┬───────┘ │
+└──────┼─────────────┼─────────────────┼────────────────────┼─────────┘
+       │             │                 │                    │
+       ▼             ▼                 ▼                    ▼
+┌─────────────┐ ┌──────────────┐ ┌──────────────┐  ┌────────────────┐
+│  Documents  │ │ Operational  │ │   Snapshot   │  │ Action Ledger  │
+│  6 pack PDFs│ │     Data     │ │    clock     │  │  (in memory)   │
+│ + historical│ │ - Accounts   │ │  2026-08-16  │  │ proposed →     │
+│   tickets   │ │ - Orders     │ │  11:00 IST   │  │ confirmed      │
+│ (authority  │ │ - Tickets    │ │              │  │                │
+│  scored)    │ │              │ │              │  │                │
+└─────────────┘ └──────────────┘ └──────────────┘  └────────────────┘
 ```
 
 ## Agent Design
@@ -68,7 +74,8 @@ out from lookup so that retrieving a record and reasoning about it stay separate
 - Returns results ranked by:
   - Relevance to query
   - Source reliability (high/medium/low)
-  - Document freshness
+  - Supersession (a superseded document is halved)
+  - The asking account's own signed agreement, boosted above general policy
 - Handles policy conflicts by weighing authority
 - Example: Finding cancellation policy for specific account type
 
@@ -115,7 +122,7 @@ Example: "Can Northstar cancel ORD-1001 without a fee?"
 
 ### Source Reliability System
 
-Three-tier reliability model informs answer confidence:
+Three-tier reliability model drives ranking and the trust note shown to the model:
 
 **HIGH Reliability (Primary Authority)**
 - Current policies (v3+)
@@ -149,9 +156,10 @@ the contradicting source did not exist. Ambiguities that remain are escalated.
 All time-based reasoning is measured against the dataset snapshot stated in the workbook
 README (`2026-08-16 11:00 Asia/Kolkata`), not the wall clock.
 
-### Confidence & Escalation Logic
+### Escalation Logic
 
-Agent escalates when:
+Escalation is driven by the system prompt, not a computed score. The agent is instructed
+to escalate when:
 - Query requires judgment outside system authority
 - Conflicting information from multiple sources
 - Information is outdated or uncertain
@@ -214,13 +222,13 @@ is the reason it lives in the tool layer rather than the transport.
 - ✓ View all operational data
 - ✓ Access all documentation
 - ✓ Create escalations
-- ✓ Update tickets and orders
 - ✓ View all customer information
 
 **Operations Staff Context**
 - ✓ Currently identical in permission to support staff
 - The role exists as a distinct user type so operational tooling (see the Product Note)
   can be scoped to it later without reworking the access layer
+  
 
 ### Mock Authentication
 
@@ -319,10 +327,6 @@ policy when its sources are unavailable is worse than one that does not start.
 **Why React:** 
 - the interface needed expandable per-message tool traces and inline
 confirm/reject controls whose state has to survive re-renders. Component state is the natural fit. The framework choice is not load-bearing here — any of React, Vue or Svelte would have worked.
-
-**Alternative:**
-- Vue, Svelte for smaller bundles
-- But React offers faster hiring/scaling
 
 ### Decision: Confirmation Required for All Actions
 
@@ -445,6 +449,8 @@ what it does not do.
 - **No persistence.** Documents, records and the action ledger are all in memory. A restart
   loses the audit trail of who authorised what, which is the part that would matter first
   in production.
+- **Actions are recorded, not applied.** A confirmed action is an auditable record of
+  intent. It does not mutate the order or ticket row; the pack workbook is read-only here.
 - **Single instance required.** A consequence of the above; see the deployment section.
 - **Mocked authentication.** The request context is trusted. Enforcement is in the right
   place, but its input is not yet verified.
@@ -458,6 +464,7 @@ what it does not do.
   measuring whether the agent actually resolves precedence correctly across many phrasings.
   This is the gap I would close first, because it is the only way to know whether a prompt
   change made things better or worse.
+
 
 ## Conclusion
 

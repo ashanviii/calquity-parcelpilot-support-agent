@@ -370,7 +370,7 @@ then a persistent action ledger, then hybrid retrieval once the corpus outgrows 
 npm run verify
 ```
 
-35 checks over the real data pack, no API key required: access control (cross-account
+42 checks over the real data pack, no API key required: access control (cross-account
 denial, scope-widening attempts), retrieval authority ordering, the derived calculations
 against known records, and the confirm-before-execute contract. Exits non-zero on failure.
 
